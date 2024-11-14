@@ -105,6 +105,10 @@ type Transport struct {
 	// plain-text "http" scheme. Note that this does not enable h2c support.
 	AllowHTTP bool
 
+	// MaxConcurrentStreams optionally specifies the http2 SETTINGS_MAX_CONCURRENT_STREAMS
+	// if the server specifies a lower limit, the lower limit will be respected.
+	MaxConcurrentStreams uint32
+
 	// MaxHeaderListSize is the http2 SETTINGS_MAX_HEADER_LIST_SIZE to
 	// send in the initial settings frame. It is how many bytes
 	// of response headers are allowed. Unlike the http2 spec, zero here
@@ -388,14 +392,15 @@ type ClientConn struct {
 	lastActive      time.Time
 	lastIdle        time.Time // time last idle
 	// Settings from peer: (also guarded by wmu)
-	maxFrameSize                uint32
-	maxConcurrentStreams        uint32
-	peerMaxHeaderListSize       uint64
-	peerMaxHeaderTableSize      uint32
-	initialWindowSize           uint32
-	initialStreamRecvWindowSize int32
-	readIdleTimeout             time.Duration
-	pingTimeout                 time.Duration
+	maxFrameSize                  uint32
+	maxConcurrentStreams          uint32
+	maxConcurrentStreamsHardLimit uint32
+	peerMaxHeaderListSize         uint64
+	peerMaxHeaderTableSize        uint32
+	initialWindowSize             uint32
+	initialStreamRecvWindowSize   int32
+	readIdleTimeout               time.Duration
+	pingTimeout                   time.Duration
 
 	// pendingResets is the number of RST_STREAM frames we have sent to the peer,
 	// without confirming that the peer has received them. When we send a RST_STREAM,
@@ -808,23 +813,27 @@ func (t *Transport) NewClientConn(c net.Conn) (*ClientConn, error) {
 func (t *Transport) newClientConn(c net.Conn, singleUse bool) (*ClientConn, error) {
 	conf := configFromTransport(t)
 	cc := &ClientConn{
-		t:                           t,
-		tconn:                       c,
-		readerDone:                  make(chan struct{}),
-		nextStreamID:                1,
-		maxFrameSize:                16 << 10, // spec default
-		initialWindowSize:           65535,    // spec default
-		initialStreamRecvWindowSize: conf.MaxUploadBufferPerStream,
-		maxConcurrentStreams:        initialMaxConcurrentStreams, // "infinite", per spec. Use a smaller value until we have received server settings.
-		peerMaxHeaderListSize:       0xffffffffffffffff,          // "infinite", per spec. Use 2^64-1 instead.
-		streams:                     make(map[uint32]*clientStream),
-		singleUse:                   singleUse,
-		wantSettingsAck:             true,
-		readIdleTimeout:             conf.SendPingTimeout,
-		pingTimeout:                 conf.PingTimeout,
-		pings:                       make(map[[8]byte]chan struct{}),
-		reqHeaderMu:                 make(chan struct{}, 1),
-		lastActive:                  t.now(),
+		t:                             t,
+		tconn:                         c,
+		readerDone:                    make(chan struct{}),
+		nextStreamID:                  1,
+		maxFrameSize:                  16 << 10, // spec default
+		initialWindowSize:             65535,    // spec default
+		initialStreamRecvWindowSize:   conf.MaxUploadBufferPerStream,
+		maxConcurrentStreamsHardLimit: conf.MaxConcurrentStreams,
+		maxConcurrentStreams:          initialMaxConcurrentStreams, // "infinite", per spec. Use a smaller value until we have received server settings.
+		peerMaxHeaderListSize:         0xffffffffffffffff,          // "infinite", per spec. Use 2^64-1 instead.
+		streams:                       make(map[uint32]*clientStream),
+		singleUse:                     singleUse,
+		wantSettingsAck:               true,
+		readIdleTimeout:               conf.SendPingTimeout,
+		pingTimeout:                   conf.PingTimeout,
+		pings:                         make(map[[8]byte]chan struct{}),
+		reqHeaderMu:                   make(chan struct{}, 1),
+		lastActive:                    t.now(),
+	}
+	if cc.maxConcurrentStreams > cc.maxConcurrentStreamsHardLimit {
+		cc.maxConcurrentStreams = cc.maxConcurrentStreamsHardLimit
 	}
 	var group synctestGroupInterface
 	if t.transportTestHooks != nil {
@@ -3047,7 +3056,9 @@ func (rl *clientConnReadLoop) processSettingsNoWrite(f *SettingsFrame) error {
 		case SettingMaxFrameSize:
 			cc.maxFrameSize = s.Val
 		case SettingMaxConcurrentStreams:
-			cc.maxConcurrentStreams = s.Val
+			if s.Val < cc.maxConcurrentStreamsHardLimit {
+				cc.maxConcurrentStreams = s.Val
+			}
 			seenMaxConcurrentStreams = true
 		case SettingMaxHeaderListSize:
 			cc.peerMaxHeaderListSize = uint64(s.Val)
@@ -3088,7 +3099,9 @@ func (rl *clientConnReadLoop) processSettingsNoWrite(f *SettingsFrame) error {
 			// didn't contain a MAX_CONCURRENT_STREAMS field so
 			// increase the number of concurrent streams this
 			// connection can establish to our default.
-			cc.maxConcurrentStreams = defaultMaxConcurrentStreams
+			if defaultMaxConcurrentStreams < cc.maxConcurrentStreams {
+				cc.maxConcurrentStreams = defaultMaxConcurrentStreams
+			}
 		}
 		cc.seenSettings = true
 	}

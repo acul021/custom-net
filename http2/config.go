@@ -70,6 +70,7 @@ func configFromTransport(h2 *Transport) http2Config {
 		SendPingTimeout:           h2.ReadIdleTimeout,
 		PingTimeout:               h2.PingTimeout,
 		WriteByteTimeout:          h2.WriteByteTimeout,
+		MaxConcurrentStreams:      h2.MaxConcurrentStreams,
 	}
 
 	// Unlike most config fields, where out-of-range values revert to the default,
@@ -94,7 +95,11 @@ func setDefault[T ~int | ~int32 | ~uint32 | ~int64](v *T, minval, maxval, defval
 }
 
 func setConfigDefaults(conf *http2Config, server bool) {
-	setDefault(&conf.MaxConcurrentStreams, 1, math.MaxUint32, defaultMaxStreams)
+	if server { // if this is a client, and not set, it will use the default limits
+		setDefault(&conf.MaxConcurrentStreams, 1, math.MaxUint32, defaultMaxStreams)
+	} else {
+		setDefault(&conf.MaxConcurrentStreams, 1, math.MaxUint32, math.MaxUint32)
+	}
 	setDefault(&conf.MaxEncoderHeaderTableSize, 1, math.MaxUint32, initialHeaderTableSize)
 	setDefault(&conf.MaxDecoderHeaderTableSize, 1, math.MaxUint32, initialHeaderTableSize)
 	if server {
