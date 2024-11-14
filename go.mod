@@ -1,4 +1,4 @@
-module golang.org/x/net
+module github.com/acul021/custom-net
 
 go 1.18
 
